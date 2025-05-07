@@ -1,27 +1,20 @@
 import os
 import logging
 from fastapi import FastAPI, Request, HTTPException
-import requests
+import httpx
 
 app = FastAPI()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# Pobranie tokenu Infakt z zmiennych środowiskowych
-token = os.getenv("INFAKT_API_TOKEN")
-if not token:
+INFAKT_TOKEN = os.getenv("INFAKT_API_TOKEN")
+if not INFAKT_TOKEN:
     raise RuntimeError("Brakuje zmiennej środowiskowej INFAKT_API_TOKEN")
 
-# Nagłówki do autoryzacji w API Infakt
 INFAKT_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
-    # Infakt wymaga nagłówka Api-Key zamiast Authorization
-    "Api-Key": token
+    "Api-Key": INFAKT_TOKEN,
 }
-BASE_URL = "https://api.infakt.pl/v3"
 
 @app.post("/shopify")
 async def shopify_webhook(req: Request):
@@ -30,48 +23,45 @@ async def shopify_webhook(req: Request):
     email = order.get("email")
     logging.info(f"✅ Otrzymano zamówienie #{order_no} od {email}")
 
-    # Tworzenie klienta w Infakt
+    # Utworzenie klienta w Infakt
     client_payload = {
         "client": {
-            "email": email
-            # w razie potrzeby dodaj inne pola (np. nazwa, adres)
+            "email": email,
+            "name": order.get("billing_address", {}).get("name", ""),
+            "company": ""
         }
     }
-    resp_client = requests.post(
-        f"{BASE_URL}/clients.json",
-        json=client_payload,
-        headers=INFAKT_HEADERS
-    )
-    if resp_client.status_code != 201:
-        logging.error(f"❌ Błąd tworzenia klienta: {resp_client.status_code} {resp_client.text}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Błąd tworzenia klienta: {resp_client.text}"
-        )
-    client_id = resp_client.json().get("client", {}).get("id")
-    logging.info(f"✅ Utworzono klienta w Infakt: {client_id}")
+    try:
+        resp = httpx.post("https://api.infakt.pl/v3/clients.json", headers=INFAKT_HEADERS, json=client_payload)
+        resp.raise_for_status()
+        client_id = resp.json().get("client", {}).get("id")
+        logging.info(f"✅ Utworzono klienta ID {client_id}")
+    except httpx.HTTPStatusError as e:
+        logging.error(f"❌ Błąd tworzenia klienta: {e.response.status_code} {e.response.text}")
+        raise HTTPException(status_code=500, detail="Błąd tworzenia klienta")
 
-    # Tworzenie faktury w Infakt
+    # Utworzenie faktury
     invoice_payload = {
         "invoice": {
             "client_id": client_id,
-            "number": str(order_no),
-            # pozycje faktury: uzupełnij według linii zamówienia
-            "positions": []
+            "currency": order.get("currency", "PLN"),
+            "issue_date": order.get("created_at", "").split("T")[0],
+            "invoice_items": [
+                {
+                    "name": item.get("title"),
+                    "quantity": item.get("quantity"),
+                    "unit_price": item.get("price")
+                } for item in order.get("line_items", [])
+            ]
         }
     }
-    resp_invoice = requests.post(
-        f"{BASE_URL}/invoices.json",
-        json=invoice_payload,
-        headers=INFAKT_HEADERS
-    )
-    if resp_invoice.status_code not in (200, 201):
-        logging.error(f"❌ Błąd tworzenia faktury: {resp_invoice.status_code} {resp_invoice.text}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Błąd tworzenia faktury: {resp_invoice.text}"
-        )
-    invoice_id = resp_invoice.json().get("invoice", {}).get("id")
-    logging.info(f"✅ Utworzono fakturę w Infakt: {invoice_id}")
+    try:
+        resp = httpx.post("https://api.infakt.pl/v3/invoices.json", headers=INFAKT_HEADERS, json=invoice_payload)
+        resp.raise_for_status()
+        invoice_id = resp.json().get("invoice", {}).get("id")
+        logging.info(f"✅ Utworzono fakturę ID {invoice_id}")
+    except httpx.HTTPStatusError as e:
+        logging.error(f"❌ Błąd tworzenia faktury: {e.response.status_code} {e.response.text}")
+        raise HTTPException(status_code=500, detail="Błąd tworzenia faktury")
 
     return {"status": "ok"}
