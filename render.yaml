@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: shopify-infakt-webhook
+    env: python3
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # Pobieraj sekret z panelu Render (sekret musi istnieć w UI pod tą nazwą):
+    secretEnvVars:
+      - key: INFAKT_API_TOKEN
