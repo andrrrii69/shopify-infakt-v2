@@ -4,17 +4,24 @@ from fastapi import FastAPI, Request, HTTPException
 import requests
 
 app = FastAPI()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
-INFAKT_TOKEN = os.getenv("INFAKT_API_TOKEN")
-if not INFAKT_TOKEN:
+# Pobranie tokenu Infakt z zmiennych środowiskowych
+token = os.getenv("INFAKT_API_TOKEN")
+if not token:
     raise RuntimeError("Brakuje zmiennej środowiskowej INFAKT_API_TOKEN")
 
+# Nagłówki do autoryzacji w API Infakt
 INFAKT_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
-    "Authorization": f"Bearer {INFAKT_TOKEN}",
+    # Infakt wymaga nagłówka Api-Key zamiast Authorization
+    "Api-Key": token
 }
+BASE_URL = "https://api.infakt.pl/v3"
 
 @app.post("/shopify")
 async def shopify_webhook(req: Request):
@@ -23,58 +30,48 @@ async def shopify_webhook(req: Request):
     email = order.get("email")
     logging.info(f"✅ Otrzymano zamówienie #{order_no} od {email}")
 
-    # 1) Twórz klienta
+    # Tworzenie klienta w Infakt
     client_payload = {
         "client": {
-            "name": order["billing_address"]["name"],
-            "email": email,
-            "addresses": [{
-                "street": order["billing_address"]["address1"],
-                "zip": order["billing_address"]["zip"],
-                "city": order["billing_address"]["city"],
-                "country": order["billing_address"]["country_code"],
-            }]
+            "email": email
+            # w razie potrzeby dodaj inne pola (np. nazwa, adres)
         }
     }
-    r = requests.post(
-        "https://api.infakt.pl/v3/clients.json",
+    resp_client = requests.post(
+        f"{BASE_URL}/clients.json",
         json=client_payload,
-        headers=INFAKT_HEADERS,
-        timeout=10
+        headers=INFAKT_HEADERS
     )
-    if not r.ok:
-        logging.error(f"❌ Błąd tworzenia klienta: {r.status_code} {r.text}")
-        raise HTTPException(500, "Nie udało się utworzyć klienta w Infakcie")
-    client_id = r.json()["client"]["id"]
-    logging.info(f"🆔 Utworzono klienta id={client_id}")
+    if resp_client.status_code != 201:
+        logging.error(f"❌ Błąd tworzenia klienta: {resp_client.status_code} {resp_client.text}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd tworzenia klienta: {resp_client.text}"
+        )
+    client_id = resp_client.json().get("client", {}).get("id")
+    logging.info(f"✅ Utworzono klienta w Infakt: {client_id}")
 
-    # 2) Twórz fakturę
-    lines = []
-    for li in order.get("line_items", []):
-        lines.append({
-            "name": li["title"],
-            "quantity": li["quantity"],
-            "price_net": li["price"],
-            "tax": 0
-        })
+    # Tworzenie faktury w Infakt
     invoice_payload = {
         "invoice": {
-            "kind": "income",
             "client_id": client_id,
-            "issue_date": order["created_at"][:10],
-            "lines": lines
+            "number": str(order_no),
+            # pozycje faktury: uzupełnij według linii zamówienia
+            "positions": []
         }
     }
-    r = requests.post(
-        "https://api.infakt.pl/v3/invoices.json",
+    resp_invoice = requests.post(
+        f"{BASE_URL}/invoices.json",
         json=invoice_payload,
-        headers=INFAKT_HEADERS,
-        timeout=10
+        headers=INFAKT_HEADERS
     )
-    if not r.ok:
-        logging.error(f"❌ Błąd tworzenia faktury: {r.status_code} {r.text}")
-        raise HTTPException(500, "Nie udało się wystawić faktury w Infakcie")
-    inv = r.json()["invoice"]
-    logging.info(f"✅ Wystawiono fakturę id={inv['id']} nr={inv['full_number']}")
+    if resp_invoice.status_code not in (200, 201):
+        logging.error(f"❌ Błąd tworzenia faktury: {resp_invoice.status_code} {resp_invoice.text}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Błąd tworzenia faktury: {resp_invoice.text}"
+        )
+    invoice_id = resp_invoice.json().get("invoice", {}).get("id")
+    logging.info(f"✅ Utworzono fakturę w Infakt: {invoice_id}")
 
     return {"status": "ok"}
